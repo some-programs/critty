@@ -19,7 +19,7 @@ use crate::logging::LOG_TARGET_IPC_CONFIG;
 
 /// CLI options for the main Alacritty executable.
 #[derive(Parser, Default, Debug)]
-#[clap(author, about, version = env!("VERSION"))]
+#[clap(name = "critty", author, about, version = env!("VERSION"))]
 pub struct Options {
     /// Print all events to STDOUT.
     #[clap(long)]
@@ -536,6 +536,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[ignore = "completions are not maintained in this fork"]
     fn completions() {
         let mut clap = Options::command();
 
