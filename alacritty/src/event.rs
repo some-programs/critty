@@ -45,7 +45,7 @@ use alacritty_terminal::term::{self, ClipboardType, Term, TermMode};
 use alacritty_terminal::vte::ansi::NamedColor;
 
 #[cfg(unix)]
-use crate::cli::{IpcConfig, ParsedOptions};
+use crate::cli::{IpcConfig, IpcReadScreen, ParsedOptions};
 use crate::cli::{Options as CliOptions, WindowOptions};
 use crate::clipboard::Clipboard;
 use crate::config::ui_config::{HintAction, HintInternalAction};
@@ -64,6 +64,8 @@ use crate::message_bar::{Message, MessageBuffer};
 use crate::polling::ipc::{self, SocketReply};
 use crate::scheduler::{Scheduler, TimerId, Topic};
 use crate::window_context::WindowContext;
+#[cfg(unix)]
+use crate::window_context::remote::remote_window;
 
 /// Duration after the last user input until an unlimited search is performed.
 pub const TYPING_SEARCH_DELAY: Duration = Duration::from_millis(500);
@@ -340,6 +342,28 @@ impl ApplicationHandler<Event> for Processor {
                     ipc::send_reply(&mut stream, SocketReply::GetConfig(config_json));
                 }
             },
+            // Process IPC remote control requests.
+            #[cfg(unix)]
+            (EventType::IpcReadScreen(stream, args), window_id) => {
+                let reply = match remote_window(&self.windows, window_id) {
+                    Ok(window) => SocketReply::ReadScreen(window.read_screen(&args)),
+                    Err(error) => SocketReply::Error(error),
+                };
+                if let Ok(mut stream) = stream.try_clone() {
+                    ipc::send_reply(&mut stream, reply);
+                }
+            },
+            #[cfg(unix)]
+            (EventType::IpcSendText(stream, text), window_id) => {
+                match remote_window(&self.windows, window_id) {
+                    Ok(window) => window.send_text(text),
+                    Err(error) => {
+                        if let Ok(mut stream) = stream.try_clone() {
+                            ipc::send_reply(&mut stream, SocketReply::Error(error));
+                        }
+                    },
+                }
+            },
             (EventType::ConfigReload(path), _) => {
                 // Clear config logs from message bar for all terminals.
                 for window_context in self.windows.values_mut() {
@@ -550,6 +574,10 @@ pub enum EventType {
     IpcConfig(IpcConfig),
     #[cfg(unix)]
     IpcGetConfig(Arc<UnixStream>),
+    #[cfg(unix)]
+    IpcReadScreen(Arc<UnixStream>, IpcReadScreen),
+    #[cfg(unix)]
+    IpcSendText(Arc<UnixStream>, String),
     BlinkCursor,
     BlinkCursorTimeout,
     SearchNext,
@@ -1929,7 +1957,11 @@ impl input::Processor<EventProxy, ActionContext<'_, Notifier, EventProxy>> {
                     TerminalEvent::Exit | TerminalEvent::ChildExit(_) | TerminalEvent::Wakeup => (),
                 },
                 #[cfg(unix)]
-                EventType::IpcConfig(_) | EventType::IpcGetConfig(..) | EventType::Shutdown => (),
+                EventType::IpcConfig(_)
+                | EventType::IpcGetConfig(..)
+                | EventType::IpcReadScreen(..)
+                | EventType::IpcSendText(..)
+                | EventType::Shutdown => (),
                 EventType::Message(_)
                 | EventType::ConfigReload(_)
                 | EventType::CreateWindow(_)

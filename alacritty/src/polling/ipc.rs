@@ -26,6 +26,7 @@ pub struct IpcListener {
 
     event_proxy: EventLoopProxy<Event>,
     data: String,
+    remote_control: bool,
 }
 
 impl IpcListener {
@@ -44,12 +45,13 @@ impl IpcListener {
             println!("ALACRITTY_SOCKET={}; export ALACRITTY_SOCKET", path.display());
         }
 
-        Ok(Self { event_proxy, socket, data: Default::default() })
+        let remote_control = options.remote_control.is_some();
+        Ok(Self { event_proxy, socket, data: Default::default(), remote_control })
     }
 
     /// Process the next IPC message.
     pub fn process_message(&mut self) -> Result<(), IoError> {
-        let (stream, _) = self.socket.accept()?;
+        let (mut stream, _) = self.socket.accept()?;
 
         self.data.clear();
         let mut reader = BufReader::new(&stream);
@@ -63,6 +65,7 @@ impl IpcListener {
             Ok(message) => message,
             Err(err) => {
                 warn!("Failed to parse IPC message: {err}");
+                send_reply(&mut stream, SocketReply::Error(format!("invalid message: {err}")));
                 return Ok(());
             },
         };
@@ -83,6 +86,22 @@ impl IpcListener {
                 let window_id =
                     config.window_id.and_then(|id| u64::try_from(id).ok()).map(WindowId::from);
                 let event = Event::new(EventType::IpcGetConfig(Arc::new(stream)), window_id);
+                let _ = self.event_proxy.send_event(event);
+            },
+            SocketMessage::ReadScreen(_) | SocketMessage::SendText(_) if !self.remote_control => {
+                let error =
+                    "remote control requires starting Alacritty with --remote-control NAME".into();
+                send_reply(&mut stream, SocketReply::Error(error));
+            },
+            SocketMessage::ReadScreen(args) => {
+                let window_id = args.window_id.map(WindowId::from);
+                let event = Event::new(EventType::IpcReadScreen(Arc::new(stream), args), window_id);
+                let _ = self.event_proxy.send_event(event);
+            },
+            SocketMessage::SendText(args) => {
+                let window_id = args.window_id.map(WindowId::from);
+                let event =
+                    Event::new(EventType::IpcSendText(Arc::new(stream), args.text), window_id);
                 let _ = self.event_proxy.send_event(event);
             },
         }
@@ -129,6 +148,11 @@ fn handle_reply(stream: &UnixStream, message: &SocketMessage) -> IoResult<()> {
             println!("{config}");
             Ok(())
         },
+        (SocketMessage::ReadScreen(..), SocketReply::ReadScreen(text)) => {
+            println!("{text}");
+            Ok(())
+        },
+        (_, SocketReply::Error(error)) => Err(IoError::other(error.clone())),
         // Ignore requests without reply.
         _ => Ok(()),
     }
@@ -164,6 +188,22 @@ pub fn socket_dir() -> PathBuf {
 #[cfg(target_os = "macos")]
 pub fn socket_dir() -> PathBuf {
     env::temp_dir()
+}
+
+/// IPC socket path for a remote control name.
+pub fn remote_control_socket_path(name: &str) -> PathBuf {
+    let mut path = socket_dir();
+    path.push(format!("{}-remote-control-{}.sock", socket_prefix(), name.replace('/', "-")));
+    path
+}
+
+/// IPC socket path for a remote control name, removing it if left behind by a dead process.
+pub fn claim_remote_control_socket(name: &str) -> PathBuf {
+    let path = remote_control_socket_path(name);
+    if UnixStream::connect(&path).is_err_and(|err| err.kind() == ErrorKind::ConnectionRefused) {
+        let _ = fs::remove_file(&path);
+    }
+    path
 }
 
 /// Find the IPC socket path.
@@ -235,4 +275,6 @@ pub fn socket_prefix() -> String {
 #[derive(Serialize, Deserialize, Debug)]
 pub enum SocketReply {
     GetConfig(String),
+    ReadScreen(String),
+    Error(String),
 }

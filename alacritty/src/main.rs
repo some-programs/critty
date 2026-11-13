@@ -100,7 +100,10 @@ fn msg(mut options: MessageOptions) -> Result<(), Box<dyn Error>> {
         window_options.activation_token =
             env::var("XDG_ACTIVATION_TOKEN").or_else(|_| env::var("DESKTOP_STARTUP_ID")).ok();
     }
-    ipc::send_message(options.socket, options.message).map_err(|err| err.into())
+    let socket = options
+        .socket
+        .or_else(|| options.remote_control.as_deref().map(ipc::remote_control_socket_path));
+    ipc::send_message(socket, options.message).map_err(|err| err.into())
 }
 
 /// Temporary files stored for Alacritty.
@@ -189,7 +192,7 @@ fn alacritty(mut options: Options) -> Result<(), Box<dyn Error>> {
     #[cfg(unix)]
     let socket_path = match IoListener::spawn(&config, &options, window_event_loop.create_proxy()) {
         Ok(handle) => handle.ipc_socket_path,
-        Err(err) if options.daemon => return Err(err.into()),
+        Err(err) if options.daemon || options.remote_control.is_some() => return Err(err.into()),
         Err(err) => {
             log::warn!("Unable to create socket: {err:?}");
             None

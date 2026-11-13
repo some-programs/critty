@@ -1,10 +1,13 @@
 use std::cmp::max;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::env;
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use alacritty_config::SerdeReplace;
+use clap::builder::RangedU64ValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueHint};
 use log::{LevelFilter, error};
 use serde::{Deserialize, Serialize};
@@ -16,6 +19,10 @@ use crate::config::UiConfig;
 use crate::config::ui_config::Program;
 use crate::config::window::{Class, Identity};
 use crate::logging::LOG_TARGET_IPC_CONFIG;
+
+/// Environment variable read for the `--remote-control` name.
+#[cfg(unix)]
+const REMOTE_CONTROL_ENV: &str = "CRITTY_REMOTE_CONTROL";
 
 /// CLI options for the main Alacritty executable.
 #[derive(Parser, Default, Debug)]
@@ -54,6 +61,12 @@ pub struct Options {
     #[clap(long, value_hint = ValueHint::FilePath)]
     pub socket: Option<PathBuf>,
 
+    /// Allow other programs to read the screen and send input, using `alacritty msg
+    /// --remote-control NAME`.
+    #[cfg(unix)]
+    #[clap(long, value_name = "NAME", env = REMOTE_CONTROL_ENV)]
+    pub remote_control: Option<String>,
+
     /// Reduces the level of verbosity (the min level is -qq).
     #[clap(short, conflicts_with("verbose"), action = ArgAction::Count)]
     quiet: u8,
@@ -83,6 +96,14 @@ impl Options {
     pub fn new() -> Self {
         let mut options = Self::parse();
 
+        // Treat an empty name like an unset one, as shells do for empty variables, and keep
+        // terminals started from this one from claiming the same name.
+        #[cfg(unix)]
+        {
+            options.remote_control = options.remote_control.filter(|name| !name.is_empty());
+            unsafe { env::remove_var(REMOTE_CONTROL_ENV) };
+        }
+
         // Parse CLI config overrides.
         options.config_options = options.window_options.config_overrides();
 
@@ -92,7 +113,7 @@ impl Options {
     /// Override configuration file with options from the CLI.
     pub fn override_config(&mut self, config: &mut UiConfig) {
         #[cfg(unix)]
-        if self.socket.is_some() {
+        if self.socket.is_some() || self.remote_control.is_some() {
             config.ipc_socket = Some(true);
         }
 
@@ -246,6 +267,10 @@ pub struct MessageOptions {
     #[clap(short, long, value_hint = ValueHint::FilePath)]
     pub socket: Option<PathBuf>,
 
+    /// Remote control name of the target instance.
+    #[clap(long, conflicts_with = "socket", value_name = "NAME")]
+    pub remote_control: Option<String>,
+
     /// Message which should be sent.
     #[clap(subcommand)]
     pub message: SocketMessage,
@@ -263,6 +288,55 @@ pub enum SocketMessage {
 
     /// Read runtime Alacritty configuration.
     GetConfig(IpcGetConfig),
+
+    /// Print the visible text of a window, or rows of its scrollback history.
+    ReadScreen(IpcReadScreen),
+
+    /// Write text to a window's terminal input.
+    SendText(IpcSendText),
+}
+
+/// Parameters to the `read-screen` IPC subcommand.
+#[cfg(unix)]
+#[derive(Args, Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct IpcReadScreen {
+    /// Window ID to read [default: first window].
+    #[clap(short, long)]
+    pub window_id: Option<u64>,
+
+    /// Include colors and text attributes as ANSI escape sequences.
+    #[clap(long)]
+    #[serde(default)]
+    pub ansi: bool,
+
+    /// Read the last N rows of scrollback history and screen instead of the visible rows.
+    ///
+    /// The rows end at the bottom of the screen, whatever the window's scroll position.
+    #[clap(
+        long,
+        value_name = "N",
+        conflicts_with = "all",
+        value_parser = RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    #[serde(default)]
+    pub lines: Option<usize>,
+
+    /// Read all scrollback history and the screen instead of the visible rows.
+    #[clap(long)]
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// Parameters to the `send-text` IPC subcommand.
+#[cfg(unix)]
+#[derive(Args, Serialize, Deserialize, Default, Debug, Clone, PartialEq, Eq)]
+pub struct IpcSendText {
+    /// Text written as-is to the terminal [example: $'ls\r'].
+    pub text: String,
+
+    /// Window ID to write to [default: first window].
+    #[clap(short, long)]
+    pub window_id: Option<u64>,
 }
 
 /// Migrate the configuration file.

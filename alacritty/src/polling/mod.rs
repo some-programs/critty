@@ -46,7 +46,9 @@ impl IoListener {
 
         // Create socket listener for IPC messages.
         let (ipc_socket_path, ipc_listener) = if config.ipc_socket() {
-            let ipc_socket_path = options.socket.clone().unwrap_or_else(|| {
+            let remote_socket =
+                options.remote_control.as_deref().map(ipc::claim_remote_control_socket);
+            let ipc_socket_path = options.socket.clone().or(remote_socket).unwrap_or_else(|| {
                 let mut path = ipc::socket_dir();
                 path.push(format!("{}-{}.sock", ipc::socket_prefix(), process::id()));
                 path
